@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+/* This @theme block replaces the old tailwind.config.ts! */
+@theme {
+  --animate-pulse-fast: pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-fade-in: fadeIn 0.5s ease-out forwards;
+
+  @keyframes fadeIn {
+    0% { opacity: 0; transform: translateY(10px); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+}
+
+@layer base {
+  body {
+    @apply bg-slate-950 text-slate-50 antialiased;
+  }
+}
+
+/* Custom scrollbar for the Agent Terminal */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-slate-800 rounded-full;
+}
+
+/* Dark mode map filter (Makes default Leaflet look like a spy satellite map) */
+.leaflet-layer,
+.leaflet-control-zoom-in,
+.leaflet-control-zoom-out,
+.leaflet-control-attribution {
+  filter: invert(100%) hue-rotate(180deg) brightness(95%) contrast(90%);
+}
