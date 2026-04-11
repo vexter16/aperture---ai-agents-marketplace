@@ -19,7 +19,7 @@ async function setupDatabase() {
       CREATE TABLE IF NOT EXISTS submitters (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         wallet_address TEXT UNIQUE NOT NULL,
-        reputation_score FLOAT DEFAULT 0.3,
+        reputation_score FLOAT DEFAULT 0.5,
         total_submissions INT DEFAULT 0,
         confirmed_count INT DEFAULT 0,
         contradicted_count INT DEFAULT 0,
@@ -33,7 +33,7 @@ async function setupDatabase() {
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         submitter_id UUID REFERENCES submitters(id),
         text_claim TEXT NOT NULL,
-        domain TEXT CHECK (domain IN ('financial', 'logistics', 'agricultural')) NOT NULL,
+        domain TEXT CHECK (domain IN ('financial', 'logistics', 'agricultural', 'maritime-logistics', 'energy', 'infrastructure')) NOT NULL,
         location_name TEXT,
         latitude FLOAT,
         longitude FLOAT,
@@ -94,6 +94,14 @@ async function setupDatabase() {
         amount_usdc FLOAT NOT NULL,
         tx_hash TEXT,
         status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'failed')),
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      -- 6b. Agents table (moved from runtime code to setup script)
+      CREATE TABLE IF NOT EXISTS agents (
+        id TEXT PRIMARY KEY,
+        trust_score FLOAT DEFAULT 0.5,
+        total_queries INT DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
 

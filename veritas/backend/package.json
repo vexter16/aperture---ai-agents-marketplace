@@ -3,7 +3,14 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "npx ts-node src/server.ts",
+    "setup-db": "npx ts-node scripts/setup-db.ts",
+    "test:engine": "npx ts-node scripts/test-engine.ts",
+    "test:loop": "npx ts-node scripts/test-full-loop.ts",
+    "test:liar": "npx ts-node scripts/test-liar-loop.ts",
+    "test:ai": "npx ts-node scripts/test-ai.ts",
+    "simulate": "npx ts-node scripts/monte-carlo-simulator.ts",
+    "mcp": "npx ts-node src/mcp-server.ts"
   },
   "keywords": [],
   "author": "",

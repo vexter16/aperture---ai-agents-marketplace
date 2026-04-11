@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────
-// VERITAS PROTOCOL: MONTE CARLO THESIS SIMULATOR
+// APERTURE PROTOCOL: MONTE CARLO THESIS SIMULATOR
 // Simulates Organic Human Behavior vs. Coordinated Sybil Attacks
 // ─────────────────────────────────────────────────────────────────
 
@@ -78,7 +78,7 @@ function calculateProvisionalCredibility(target: FactSubmission, pool: FactSubmi
 // --- 3. Run The Simulation ---
 function runMonteCarlo() {
   console.log("\n==========================================================");
-  console.log(" 🔬 VERITAS: MONTE CARLO THESIS SIMULATOR");
+  console.log(" 🔬 APERTURE: MONTE CARLO THESIS SIMULATOR");
   console.log("==========================================================\n");
 
   // Define our Users

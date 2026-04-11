@@ -2,7 +2,6 @@
 import dynamic from 'next/dynamic';
 import 'leaflet/dist/leaflet.css';
 
-// Dynamically import the actual map so it only renders on the client side
 const DynamicMap = dynamic(() => import('./ActualMap'), {
   ssr: false,
   loading: () => (
@@ -12,7 +11,6 @@ const DynamicMap = dynamic(() => import('./ActualMap'), {
   ),
 });
 
-// Notice how we added the prop here and passed it into DynamicMap
-export default function MapWrapper({ onSelectFact }: { onSelectFact: (fact: any) => void }) {
+export default function MapWrapper({ onSelectFact }: { onSelectFact: (id: string, claim: string) => void }) {
   return <DynamicMap onSelectFact={onSelectFact} />;
 }

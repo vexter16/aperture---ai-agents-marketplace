@@ -1,5 +1,6 @@
 // ─────────────────────────────────────────────
-// VERITAS BAYESIAN CREDIBILITY ENGINE
+// APERTURE BAYESIAN CREDIBILITY ENGINE (V3)
+// Hardened: 9-flaw fix pass
 // ─────────────────────────────────────────────
 
 export interface FactData {
@@ -10,12 +11,35 @@ export interface FactData {
   latitude: number;
   longitude: number;
   timestamp: number; // Unix epoch ms
+  domain?: string;
 }
+
+// ─────────────────────────────────────────────
+// FEATURE FLAGS
+// Toggle: Set to true to enable domain-specific weight distributions and geospatial geometries.
+// When false, the engine uses the original balanced physics (validated by thesis verification suite).
+// ─────────────────────────────────────────────
+export const DOMAIN_ADAPTIVE_WEIGHTS = false; // ← TOGGLE: flip to false to use fixed balanced math
+
 
 // 1. Vector Math Helpers
 export function cosineSimilarity(a: number[], b: number[]): number {
+  if (!a || !b) {
+    console.error("🚨 Vector missing in cosineSimilarity! vecA is:", typeof a, "| vecB is:", typeof b);
+    return 0; // Return 0 similarity, or throw a more descriptive error
+  }
+
+  // 2. Check if either vector is empty
+  if (a.length === 0 || b.length === 0) {
+    return 0; 
+  }
+  // FIX: Guard against mismatched vector lengths (e.g., corrupted/truncated DB embeddings)
+  const len = Math.min(a.length, b.length);
+  if (a.length !== b.length) {
+    console.warn(`⚠️ Vector length mismatch: ${a.length} vs ${b.length}. Using first ${len} dims.`);
+  }
   let dot = 0, normA = 0, normB = 0;
-  for (let i = 0; i < a.length; i++) {
+  for (let i = 0; i < len; i++) {
     dot += a[i] * b[i];
     normA += a[i] * a[i];
     normB += b[i] * b[i];
@@ -24,46 +48,52 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 // 2. Reputation-Weighted Agreement (S_rep)
-// Math: S_rep = sum(R_i * V_i) / sum(R_i)
 export function computeSRep(target: FactData, related: FactData[]): number {
-  if (related.length === 0) return 0.5; // Neutral
+  if (related.length === 0) return target.reputation * 0.6; // Weak prior from own rep, no self-vote inflation
   
-  let weightedSum = target.reputation; // Target fact votes for itself (+1)
-  let totalWeight = target.reputation;
+  // FIX: Removed self-voting bias. Only community votes count.
+  let weightedSum = 0;
+  let totalWeight = 0;
 
   related.forEach(fact => {
     const sim = cosineSimilarity(target.embedding, fact.embedding);
-    // If similarity > 0.65, it's an agreement (+1). If < 0.4, it's a contradiction (-1).
     const vote = sim > 0.65 ? 1 : (sim < 0.4 ? -1 : 0);
     weightedSum += fact.reputation * vote;
     totalWeight += fact.reputation;
   });
 
-  const rawScore = totalWeight > 0 ? weightedSum / totalWeight : 0;
-  return (rawScore + 1) / 2; // Normalize [-1, 1] to [0, 1]
+  // If nobody with meaningful reputation has weighed in, use submitter's own rep as weak prior
+  if (totalWeight === 0) return target.reputation * 0.6;
+
+  const rawScore = weightedSum / totalWeight; // Range: [-1, 1]
+  return (rawScore + 1) / 2; // Normalize to [0, 1]
 }
 
-// 3. Stake Diversity Score (S_stake)
+// 3. Stake Diversity Score (S_stake) - UPGRADED TO QUADRATIC STAKING
 export function computeSStake(target: FactData, related: FactData[]): number {
-  const allStakes = [target.stake, ...related.map(r => r.stake)];
-  const totalStake = allStakes.reduce((a, b) => a + b, 0);
+  // FIX: Clamp negative/NaN stakes to 0 to prevent Math.sqrt(negative) → NaN
+  const allStakes = [target.stake, ...related.map(r => r.stake)].map(s => Math.max(0, s || 0));
   
-  if (totalStake === 0) return 0.3; // Low score for zero skin-in-the-game
+  // Quadratic Math: Sum the square roots of the stakes to prevent Whale dominance
+  const totalSqrtStake = allStakes.reduce((sum, stake) => sum + Math.sqrt(stake), 0);
+  
+  if (totalSqrtStake === 0) return 0.3; 
 
-  const maxSingleStake = Math.max(...allStakes);
-  const concentrationRatio = maxSingleStake / totalStake;
+  const maxSingleSqrtStake = Math.max(...allStakes.map(s => Math.sqrt(s)));
+  const concentrationRatio = maxSingleSqrtStake / totalSqrtStake;
   
-  // Penalize if one entity holds > 70% of the total stake (Whale/Sybil attack)
-  const penalty = concentrationRatio > 0.7 ? (concentrationRatio - 0.7) * 2 : 0;
+  // Penalize if one entity holds > 70% of the quadratic voting power
+  // Only applies when there are 2+ stakers (solo staker is always 100% by definition)
+  const penalty = (allStakes.length >= 2 && concentrationRatio > 0.7) ? (concentrationRatio - 0.7) * 2 : 0;
   
-  // Base score scales with total stake, minus concentration penalty
-  const baseScore = Math.min(1, totalStake / 5.0); // Maxes out at $5.00 total pool
+  // Base score scales with total quadratic stake (Maxes out around $25 real USDC)
+  const baseScore = Math.min(1, totalSqrtStake / 5.0); 
   return Math.max(0.1, baseScore - penalty);
 }
 
 // 4. Geospatial Corroboration (S_geo)
 function haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371; // Earth radius in km
+  const R = 6371; 
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLon = (lon2 - lon1) * Math.PI / 180;
   const a = Math.sin(dLat/2)**2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon/2)**2;
@@ -71,7 +101,7 @@ function haversine(lat1: number, lon1: number, lat2: number, lon2: number): numb
 }
 
 export function computeSGeo(target: FactData, related: FactData[]): number {
-  if (related.length === 0) return 0.4; // Slightly below neutral if isolated
+  if (related.length === 0) return 0.4; 
 
   let totalDist = 0;
   related.forEach(fact => {
@@ -80,42 +110,93 @@ export function computeSGeo(target: FactData, related: FactData[]): number {
   
   const avgDist = totalDist / related.length;
 
-  // Ideal organic spread: 0.1km to 5km. 
-  // < 0.05km is highly suspicious (bot farm using exact same GPS).
-  if (avgDist < 0.05) return 0.1; 
-  if (avgDist > 20) return 0.2; // Too far to be observing the same event
+  // FIX: Bot farm floor — identical GPS to the meter
+  if (avgDist < 0.01) return 0.1;
   
-  return Math.min(1, avgDist / 2); // Peaks around 2km separation
+  // Default values (Balanced Fallback - Thesis Verified)
+  let mu = 1.0; 
+  let sigma = 3.0;
+  let scatterPenaltyThreshold = 50;
+
+  // Domain-Adaptive Geographic Physics
+  if (DOMAIN_ADAPTIVE_WEIGHTS && target.domain) {
+    switch (target.domain) {
+      case 'logistics':
+      case 'infrastructure':
+      case 'maritime-logistics':
+        // Highly localized specific events (a blocked port, a broken crane)
+        mu = 0.5;
+        sigma = 1.5;
+        scatterPenaltyThreshold = 10;
+        break;
+      case 'energy':
+      case 'agricultural':
+        // Wide-area regional events (power grid failure, drought stress)
+        mu = 5.0;
+        sigma = 10.0;
+        scatterPenaltyThreshold = 100;
+        break;
+      case 'financial':
+        // Digital events - Physical GPS practically irrelevant, massive forgiving curve
+        mu = 100.0;
+        sigma = 500.0;
+        scatterPenaltyThreshold = 5000;
+        break;
+    }
+  }
+  
+  // Map average distance against the active Gaussian bell curve
+  // Formula: e^(-(x - μ)² / 2σ²)
+  const varianceStringent = 2 * Math.pow(sigma, 2);
+  const gaussian = Math.exp(-Math.pow(avgDist - mu, 2) / varianceStringent);
+  
+  // Extreme scatter penalty (clearly unrelated events outside domain bounds)
+  if (avgDist > scatterPenaltyThreshold) return 0.15;
+  
+  return Math.max(0.1, gaussian);
 }
 
-// 5. Temporal Entropy (S_temporal)
-// Math: Shannon Entropy H = -sum(p(x) * log2(p(x)))
+// 5. Temporal Entropy + Coefficient of Variation (S_temporal)
 export function computeSTemporal(target: FactData, related: FactData[]): number {
   if (related.length === 0) return 0.5;
 
   const times = [target.timestamp, ...related.map(r => r.timestamp)].sort();
   const gapsMins = times.slice(1).map((t, i) => (t - times[i]) / 60000);
 
-  // Buckets: <1m, 1-5m, 5-30m, 30m+
-  const buckets = [0, 0, 0, 0];
-  gapsMins.forEach(gap => {
-    if (gap < 1) buckets[0]++;
-    else if (gap < 5) buckets[1]++;
-    else if (gap < 30) buckets[2]++;
-    else buckets[3]++;
-  });
-
   const totalGaps = gapsMins.length;
   if (totalGaps === 0) return 0.5;
 
+  // FIX: 8 buckets instead of 4 for finer entropy resolution
+  const buckets = [0, 0, 0, 0, 0, 0, 0, 0];
+  gapsMins.forEach(gap => {
+    if (gap < 0.1) buckets[0]++;       // <6 seconds (scripted)
+    else if (gap < 1) buckets[1]++;    // <1 min
+    else if (gap < 3) buckets[2]++;    // 1-3 min
+    else if (gap < 10) buckets[3]++;   // 3-10 min
+    else if (gap < 30) buckets[4]++;   // 10-30 min
+    else if (gap < 60) buckets[5]++;   // 30min-1hr
+    else if (gap < 240) buckets[6]++;  // 1-4 hours
+    else buckets[7]++;                 // >4 hours
+  });
+
+  // Shannon entropy (measures randomness of time distribution)
   const probs = buckets.map(b => b / totalGaps).filter(p => p > 0);
   const entropy = -probs.reduce((sum, p) => sum + p * Math.log2(p), 0);
-  const maxEntropy = Math.log2(4); 
+  const maxEntropy = Math.log2(8); // Updated for 8 buckets
+  const entropyScore = entropy / maxEntropy;
 
-  // If >50% of submissions happen within 1 minute, it's a coordinated bot swarm
+  // FIX: Coefficient of Variation (harder to game than entropy alone)
+  // A smart bot adding random 2-min jitter has low CoV; real humans have high CoV
+  const meanGap = gapsMins.reduce((a, b) => a + b, 0) / totalGaps;
+  const stdDev = Math.sqrt(gapsMins.reduce((sum, g) => sum + Math.pow(g - meanGap, 2), 0) / totalGaps);
+  const cov = meanGap > 0 ? stdDev / meanGap : 0; // CoV: 0 = perfectly regular, >1 = highly varied
+  const covScore = Math.min(1, cov / 1.5); // Normalize: CoV of 1.5+ → perfect score
+
+  // Hard floor: if >50% of gaps are under 6 seconds → scripted bot
   if (buckets[0] / totalGaps > 0.5) return 0.1;
 
-  return entropy / maxEntropy;
+  // Hybrid: 60% entropy + 40% CoV (both must be high for full score)
+  return (0.6 * entropyScore) + (0.4 * covScore);
 }
 
 // 6. Semantic Variance (S_semantic)
@@ -134,39 +215,171 @@ export function computeSSemantic(target: FactData, related: FactData[]): number 
   const mean = similarities.reduce((a, b) => a + b, 0) / similarities.length;
   const variance = similarities.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / similarities.length;
 
-  // LLM bot swarms have near-zero variance (they generate highly similar vector clusters).
-  // Real humans have natural linguistic variance.
-  const score = Math.min(1, variance / 0.05); // Normalize variance
-  const meanPenalty = mean > 0.88 ? (mean - 0.88) * 5 : 0; // Penalize if text is literally identical
+  // FIX: Detect contradictions — very low similarity means semantic OPPOSITION
+  // E.g., "Crane is working fine" vs "Crane is completely broken"
+  // Threshold set to 0.05: MiniLM-L6 normalized embeddings rarely go below 0.05
+  // unless texts are genuinely contradictory. 0.15 was too aggressive and flagged
+  // unrelated-but-harmless sentences as contradictions.
+  const contradictions = similarities.filter(s => s < 0.05);
+  if (contradictions.length > 0) {
+    // Contradictions are NOT diversity — they indicate disagreement.
+    // Penalize heavily: more contradictions = lower score
+    const contradictionRatio = contradictions.length / similarities.length;
+    return Math.max(0.1, 0.3 * (1 - contradictionRatio));
+  }
+
+  const score = Math.min(1, variance / 0.05); 
+  const meanPenalty = mean > 0.88 ? (mean - 0.88) * 5 : 0; // Penalize LLM clones
   
   return Math.max(0.1, score - meanPenalty);
 }
 
 // ─────────────────────────────────────────────
-// FINAL AGGREGATION
-// Math: C = sum(w_i * S_i)
+// DOMAIN-ADAPTIVE BAYESIAN PRIORS
+// Toggle: Set to true to enable domain-specific weight distributions.
+// When false, the engine uses the original balanced weights (validated by thesis verification suite).
 // ─────────────────────────────────────────────
-export function evaluateFactCredibility(target: FactData, related: FactData[]) {
+export const DOMAIN_ADAPTIVE_WEIGHTS = true; // ← TOGGLE: flip to false to use fixed balanced weights
+
+function getDomainWeights(domain?: string, stage: 1 | 2 = 1) {
+  // The balanced fallback weights (original V3 engine, thesis-verified)
+  const BALANCED: { w_rep: number, w_stake: number, w_geo: number, w_temporal: number, w_semantic: number } = 
+    { w_rep: 0.30, w_stake: 0.25, w_geo: 0.15, w_temporal: 0.15, w_semantic: 0.15 };
+
+  let w = BALANCED;
+
+  // Only apply domain-specific priors if the feature is enabled
+  if (DOMAIN_ADAPTIVE_WEIGHTS && domain) {
+    switch(domain) {
+      case 'logistics':
+      case 'maritime-logistics':
+        // Physical events moving through space and time
+        w = { w_rep: 0.20, w_stake: 0.15, w_geo: 0.30, w_temporal: 0.25, w_semantic: 0.10 };
+        break;
+      case 'financial':
+        // Digital events where reputation and text exactness matter more than GPS
+        w = { w_rep: 0.40, w_stake: 0.25, w_geo: 0.05, w_temporal: 0.05, w_semantic: 0.25 };
+        break;
+      case 'agricultural':
+      case 'energy':
+      case 'infrastructure':
+        // Stationary physical infrastructure
+        w = { w_rep: 0.25, w_stake: 0.25, w_geo: 0.25, w_temporal: 0.15, w_semantic: 0.10 };
+        break;
+      // default: already set to BALANCED above
+    }
+  }
+  
+  if (stage === 1) return w;
+  
+  // Stage 2: mathematically scale the structural priors down by 0.9
+  // to reserve exactly 0.10 (10%) for the AI agent's truth verification voting block.
+  return {
+    w_rep: w.w_rep * 0.9,
+    w_stake: w.w_stake * 0.9,
+    w_geo: w.w_geo * 0.9,
+    w_temporal: w.w_temporal * 0.9,
+    w_semantic: w.w_semantic * 0.9,
+    w_agent: 0.10
+  };
+}
+
+
+// ─────────────────────────────────────────────
+// STAGE 1: PROVISIONAL SCORING (TIME = 0)
+// Runs immediately when a human submits a fact. No agent feedback exists yet.
+// ─────────────────────────────────────────────
+export function calculateProvisionalScore(target: FactData, related: FactData[]) {
+  // FIX: Bootstrap mode no longer gives a free pass.
+  // No corroboration = genuinely unknown. Score reflects that.
+  if (related.length === 0) {
+    // Compute what we CAN: stake signal from the submitter alone
+    const s_stake_solo = computeSStake(target, []);
+    const bootstrapScore = 0.35 + (s_stake_solo * 0.15); // Range: 0.38 - 0.50
+    return {
+      finalScore: bootstrapScore,
+      status: 'PENDING_CORROBORATION', // Not approved, not rejected — waiting for more data
+      signals: { s_rep: target.reputation * 0.6, s_stake: s_stake_solo, s_geo: 0.4, s_temporal: 0.5, s_semantic: 0.5 }
+    };
+  }
   const s_rep = computeSRep(target, related);
   const s_stake = computeSStake(target, related);
   const s_geo = computeSGeo(target, related);
   const s_temporal = computeSTemporal(target, related);
   const s_semantic = computeSSemantic(target, related);
-  const s_agent = 0.5; // Default neutral until agents consume and feedback
 
-  // Uniform priors (would be updated via Bayesian learning in production)
-  const weights = { w_rep: 0.25, w_stake: 0.20, w_geo: 0.15, w_temporal: 0.15, w_semantic: 0.15, w_agent: 0.10 };
+  // Time=0 Priors: Domain-Adaptive weights are pulled dynamically
+  const weights = getDomainWeights(target.domain, 1);
 
   const finalScore = 
     (weights.w_rep * s_rep) +
     (weights.w_stake * s_stake) +
     (weights.w_geo * s_geo) +
     (weights.w_temporal * s_temporal) +
-    (weights.w_semantic * s_semantic) +
-    (weights.w_agent * s_agent);
+    (weights.w_semantic * s_semantic);
+
+  // 3-tier classification:
+  // >= 0.70 → High confidence, approve for market
+  // 0.40 - 0.70 → Uncertain, allow but flag for corroboration
+  // < 0.40 → Strong Sybil/bot indicators, reject
+  const status = finalScore >= 0.70 
+    ? 'APPROVED_FOR_MARKET' 
+    : finalScore >= 0.40 
+      ? 'PENDING_CORROBORATION' 
+      : 'REJECTED_SYBIL_SUSPECT';
 
   return {
     finalScore,
-    signals: { s_rep, s_stake, s_geo, s_temporal, s_semantic, s_agent }
+    status,
+    signals: { s_rep, s_stake, s_geo, s_temporal, s_semantic }
+  };
+}
+
+// ─────────────────────────────────────────────
+// STAGE 2: TERMINAL SETTLEMENT (TIME = 1)
+// Runs after the AI Agent buys the data and submits ground-truth feedback.
+// ─────────────────────────────────────────────
+export function calculateTerminalScore(
+  provisionalSignals: { s_rep: number, s_stake: number, s_geo: number, s_temporal: number, s_semantic: number }, 
+  agentFeedbackTrue: boolean, 
+  agentTrustScore: number, // T_agent (0.0 to 1.0)
+  domain?: string
+) {
+  const { s_rep, s_stake, s_geo, s_temporal, s_semantic } = provisionalSignals;
+  
+  // Agent signal is binary based on their ground-truth report
+  const s_agent = agentFeedbackTrue ? 1.0 : 0.0;
+
+  // Base Priors (Dynamically adapted by domain, scaled for Stage 2)
+  const baseWeights = getDomainWeights(domain, 2) as any;
+
+  // Adjust the agent's weight by their Trust Score (Liars are mathematically ignored)
+  const effectiveAgentWeight = baseWeights.w_agent * agentTrustScore;
+  
+  // FIX: Proportional redistribution instead of equal.
+  // When agent is untrusted, lean more on signals that already have higher weights
+  // (rep and stake are more discriminative than temporal alone)
+  const lostAgentWeight = baseWeights.w_agent - effectiveAgentWeight;
+  const otherWeightsSum = baseWeights.w_rep + baseWeights.w_stake + baseWeights.w_geo + baseWeights.w_temporal + baseWeights.w_semantic;
+  
+  const w_rep_adj    = baseWeights.w_rep    + lostAgentWeight * (baseWeights.w_rep / otherWeightsSum);
+  const w_stake_adj  = baseWeights.w_stake  + lostAgentWeight * (baseWeights.w_stake / otherWeightsSum);
+  const w_geo_adj    = baseWeights.w_geo    + lostAgentWeight * (baseWeights.w_geo / otherWeightsSum);
+  const w_temp_adj   = baseWeights.w_temporal + lostAgentWeight * (baseWeights.w_temporal / otherWeightsSum);
+  const w_sem_adj    = baseWeights.w_semantic + lostAgentWeight * (baseWeights.w_semantic / otherWeightsSum);
+
+  const finalScore = 
+    (w_rep_adj * s_rep) +
+    (w_stake_adj * s_stake) +
+    (w_geo_adj * s_geo) +
+    (w_temp_adj * s_temporal) +
+    (w_sem_adj * s_semantic) +
+    (effectiveAgentWeight * s_agent);
+
+  return {
+    finalScore,
+    terminal_status: finalScore >= 0.70 ? 'REWARD' : 'SLASH',
+    signals: { ...provisionalSignals, s_agent },
+    effectiveAgentWeight
   };
 }

@@ -5,7 +5,7 @@ const createVector = (base: number, variance: number) =>
   Array.from({ length: 384 }, () => base + (Math.random() * variance - variance/2));
 
 function runSimulation() {
-  console.log("🛡️ VERITAS CREDIBILITY ENGINE STRESS TEST\n");
+  console.log("🛡️ APERTURE CREDIBILITY ENGINE STRESS TEST\n");
 
   // ────────────────────────────────────────────────────────
   // SCENARIO A: ORGANIC HUMAN CORROBORATION
