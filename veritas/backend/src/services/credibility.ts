@@ -235,12 +235,9 @@ export function computeSSemantic(target: FactData, related: FactData[]): number 
 }
 
 // ─────────────────────────────────────────────
-// DOMAIN-ADAPTIVE BAYESIAN PRIORS
-// Toggle: Set to true to enable domain-specific weight distributions.
-// When false, the engine uses the original balanced weights (validated by thesis verification suite).
+// DOMAIN-ADAPTIVE HEURISTIC PRIORS
+// (Flag located at top of file)
 // ─────────────────────────────────────────────
-export const DOMAIN_ADAPTIVE_WEIGHTS = true; // ← TOGGLE: flip to false to use fixed balanced weights
-
 function getDomainWeights(domain?: string, stage: 1 | 2 = 1) {
   // The balanced fallback weights (original V3 engine, thesis-verified)
   const BALANCED: { w_rep: number, w_stake: number, w_geo: number, w_temporal: number, w_semantic: number } = 
@@ -343,7 +340,8 @@ export function calculateTerminalScore(
   provisionalSignals: { s_rep: number, s_stake: number, s_geo: number, s_temporal: number, s_semantic: number }, 
   agentFeedbackTrue: boolean, 
   agentTrustScore: number, // T_agent (0.0 to 1.0)
-  domain?: string
+  domain?: string,
+  rewardThreshold: number = 0.70 // Default 0.70; lowered in demo/bootstrap mode
 ) {
   const { s_rep, s_stake, s_geo, s_temporal, s_semantic } = provisionalSignals;
   
@@ -378,7 +376,7 @@ export function calculateTerminalScore(
 
   return {
     finalScore,
-    terminal_status: finalScore >= 0.70 ? 'REWARD' : 'SLASH',
+    terminal_status: finalScore >= rewardThreshold ? 'REWARD' : 'SLASH',
     signals: { ...provisionalSignals, s_agent },
     effectiveAgentWeight
   };

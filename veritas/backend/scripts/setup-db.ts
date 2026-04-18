@@ -33,7 +33,7 @@ async function setupDatabase() {
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         submitter_id UUID REFERENCES submitters(id),
         text_claim TEXT NOT NULL,
-        domain TEXT CHECK (domain IN ('financial', 'logistics', 'agricultural', 'maritime-logistics', 'energy', 'infrastructure')) NOT NULL,
+        domain TEXT NOT NULL, -- Constraint added dynamically below
         location_name TEXT,
         latitude FLOAT,
         longitude FLOAT,
@@ -54,6 +54,12 @@ async function setupDatabase() {
         submitted_at TIMESTAMPTZ DEFAULT NOW(),
         window_closes_at TIMESTAMPTZ DEFAULT NOW() + INTERVAL '4 hours'
       );
+
+      -- FORCE CONSTRAINT UPDATE (Schema Migration)
+      -- This ensures that if the table already existed with an old check constraint, it gets properly upgraded
+      ALTER TABLE facts DROP CONSTRAINT IF EXISTS facts_domain_check;
+      ALTER TABLE facts ADD CONSTRAINT facts_domain_check 
+      CHECK (domain IN ('financial', 'logistics', 'agricultural', 'maritime-logistics', 'energy', 'infrastructure'));
 
       -- 4. Individual signal scores per fact (for radar chart)
       CREATE TABLE IF NOT EXISTS credibility_signals (
@@ -164,7 +170,20 @@ async function setupDatabase() {
     `;
 
     await client.query(schema);
-    console.log('✅ Database schema created successfully with pgvector!');
+
+    // ─────────────────────────────────────────────
+    // BLOCKCHAIN SCHEMA MIGRATION
+    // Adds on-chain transaction tracking columns to the facts table.
+    // Uses IF NOT EXISTS so it's safe to run multiple times.
+    // ─────────────────────────────────────────────
+    const blockchainMigration = `
+      ALTER TABLE facts ADD COLUMN IF NOT EXISTS stake_tx_hash TEXT;
+      ALTER TABLE facts ADD COLUMN IF NOT EXISTS settlement_tx_hash TEXT;
+      ALTER TABLE facts ADD COLUMN IF NOT EXISTS chain_id INTEGER DEFAULT 84532;
+      ALTER TABLE facts ADD COLUMN IF NOT EXISTS staker_address TEXT;
+    `;
+    await client.query(blockchainMigration);
+    console.log('✅ Database schema created successfully with pgvector + blockchain columns!');
 
   } catch (error) {
     console.error('❌ Error setting up database:', error);

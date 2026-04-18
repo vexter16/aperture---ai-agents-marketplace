@@ -1,6 +1,5 @@
 import 'dart:io';
 import 'dart:convert';
-import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
@@ -8,6 +7,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'package:google_fonts/google_fonts.dart';
+import 'wallet_service.dart';
 
 
 // ─────────────────────────────────────────────
@@ -76,6 +76,7 @@ class _AppShellState extends State<AppShell> {
   String _apiUrl = '';
   int _submissionCount = 0;
   double? _lastScore;
+  bool _requireOnChain = true;
 
   @override
   void initState() {
@@ -86,13 +87,8 @@ class _AppShellState extends State<AppShell> {
   Future<void> _loadPrefs() async {
     final prefs = await SharedPreferences.getInstance();
 
-    // Wallet
-    String? savedWallet = prefs.getString('aperture_wallet');
-    if (savedWallet == null) {
-      final random = Random();
-      savedWallet = '0x${List.generate(40, (_) => random.nextInt(16).toRadixString(16)).join()}';
-      await prefs.setString('aperture_wallet', savedWallet);
-    }
+    // Wallet — Real Ethereum wallet from secure storage
+    String savedWallet = await ApertureWalletService.loadOrCreateWallet();
 
     // API URL
     String? savedUrl = prefs.getString('aperture_api_url');
@@ -101,12 +97,14 @@ class _AppShellState extends State<AppShell> {
     // Stats
     int count = prefs.getInt('submission_count') ?? 0;
     double? lastScore = prefs.getDouble('last_score');
+    bool requireOnChain = prefs.getBool('require_on_chain') ?? true;
 
     setState(() {
-      _wallet = savedWallet!;
+      _wallet = savedWallet;
       _apiUrl = savedUrl!;
       _submissionCount = count;
       _lastScore = lastScore;
+      _requireOnChain = requireOnChain;
     });
   }
 
@@ -131,15 +129,21 @@ class _AppShellState extends State<AppShell> {
 
   void _onWalletReset() async {
     final prefs = await SharedPreferences.getInstance();
-    final random = Random();
-    String newWallet = '0x${List.generate(40, (_) => random.nextInt(16).toRadixString(16)).join()}';
-    await prefs.setString('aperture_wallet', newWallet);
+    String newWallet = await ApertureWalletService.resetWallet();
     await prefs.setInt('submission_count', 0);
     await prefs.remove('last_score');
     setState(() {
       _wallet = newWallet;
       _submissionCount = 0;
       _lastScore = null;
+    });
+  }
+
+  void _onRequireOnChainChanged(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('require_on_chain', value);
+    setState(() {
+      _requireOnChain = value;
     });
   }
 
@@ -151,13 +155,16 @@ class _AppShellState extends State<AppShell> {
 
     final screens = [
       HomeScreen(wallet: _wallet, submissionCount: _submissionCount, lastScore: _lastScore, onNavigate: navigateToTab),
-      SubmitScreen(wallet: _wallet, apiUrl: _apiUrl, onSuccess: _onSubmissionSuccess),
-      HistoryScreen(apiUrl: _apiUrl),
+      SubmitScreen(wallet: _wallet, apiUrl: _apiUrl, onSuccess: _onSubmissionSuccess, requireOnChain: _requireOnChain, onNavigate: navigateToTab),
+      HistoryScreen(apiUrl: _apiUrl, wallet: _wallet, onNavigate: navigateToTab),
       SettingsScreen(
         wallet: _wallet,
         apiUrl: _apiUrl,
         onApiUrlChanged: _onApiUrlChanged,
         onWalletReset: _onWalletReset,
+        requireOnChain: _requireOnChain,
+        onRequireOnChainChanged: _onRequireOnChainChanged,
+        onNavigate: navigateToTab,
       ),
     ];
 
@@ -366,8 +373,10 @@ class SubmitScreen extends StatefulWidget {
   final String wallet;
   final String apiUrl;
   final Function(double score) onSuccess;
+  final bool requireOnChain;
+  final Function(int)? onNavigate;
 
-  const SubmitScreen({super.key, required this.wallet, required this.apiUrl, required this.onSuccess});
+  const SubmitScreen({super.key, required this.wallet, required this.apiUrl, required this.onSuccess, this.requireOnChain = true, this.onNavigate});
 
   @override
   State<SubmitScreen> createState() => _SubmitScreenState();
@@ -453,6 +462,42 @@ class _SubmitScreenState extends State<SubmitScreen> {
     setState(() => isSubmitting = true);
 
     try {
+      // ── PRE-CHECK: Verify wallet balances if on-chain staking is required ──
+      if (widget.requireOnChain && ApertureWalletService.isInitialized) {
+        final stakeAmount = double.tryParse(stakeController.text) ?? 0;
+        final usdcBalance = await ApertureWalletService.getUsdcBalance();
+        final ethBalance = await ApertureWalletService.getEthBalance();
+
+        if (ethBalance < 0.0001) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('⛽ Insufficient ETH for gas fees.\nYou have ${ethBalance.toStringAsFixed(5)} ETH. Send ~0.005 ETH to your wallet.'),
+                backgroundColor: AppColors.red,
+                duration: const Duration(seconds: 5),
+              ),
+            );
+          }
+          setState(() => isSubmitting = false);
+          return;
+        }
+
+        if (usdcBalance < stakeAmount) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('💰 Insufficient USDC balance.\nYou have \$${usdcBalance.toStringAsFixed(2)} but are trying to stake \$${stakeAmount.toStringAsFixed(2)}.'),
+                backgroundColor: AppColors.red,
+                duration: const Duration(seconds: 5),
+              ),
+            );
+          }
+          setState(() => isSubmitting = false);
+          return;
+        }
+      }
+
+      // ── STEP 1: Submit fact to backend (Credibility Engine evaluation) ──
       final url = '${widget.apiUrl}/facts';
       var request = http.MultipartRequest('POST', Uri.parse(url));
       request.fields['wallet_address'] = widget.wallet;
@@ -472,8 +517,59 @@ class _SubmitScreenState extends State<SubmitScreen> {
 
       if (response.statusCode == 201 || response.statusCode == 200) {
         double score = (responseData['credibility_score'] as num).toDouble();
+        String factId = responseData['id'] ?? '';
+        
+        // ── STEP 2: Sign on-chain USDC transactions (True Decentralized Staking) ──
+        String? stakeTxHash;
+        if (responseData['stakeTransactions'] != null && ApertureWalletService.isInitialized) {
+          try {
+            final stakeData = responseData['stakeTransactions'];
+            
+            // 2a: Sign USDC approve(vaultAddress, amount)
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('⛓️ Signing USDC approval on Base Sepolia...'), duration: Duration(seconds: 2)),
+              );
+            }
+            await ApertureWalletService.signApproveTransaction(stakeData['approveTransaction']);
+            
+            // Brief pause to let the approve tx propagate
+            await Future.delayed(const Duration(seconds: 3));
+            
+            // 2b: Sign vault.stakeFact(factId, amount)
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('⛓️ Locking USDC in ApertureVault...'), duration: Duration(seconds: 2)),
+              );
+            }
+            stakeTxHash = await ApertureWalletService.signStakeTransaction(stakeData['stakeTransaction']);
+            
+            final confirmRes = await http.post(
+              Uri.parse('${widget.apiUrl}/facts/$factId/confirm-stake'),
+              headers: {'Content-Type': 'application/json'},
+              body: json.encode({'stake_tx_hash': stakeTxHash}),
+            );
+            if (confirmRes.statusCode != 200) {
+              throw Exception('Transaction reverted or out of gas on-chain');
+            }
+          } catch (e) {
+            // On-chain staking failed
+            debugPrint('⚠️ On-chain staking failed: $e');
+            if (widget.requireOnChain && mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('❌ Staking failed: ${e.toString().length > 80 ? '${e.toString().substring(0, 80)}...' : e}'),
+                  backgroundColor: AppColors.red,
+                  duration: const Duration(seconds: 5),
+                ),
+              );
+              return; // Do not show success dialog if staking failed!
+            }
+          }
+        }
+
         widget.onSuccess(score);
-        _showSuccessDialog(score, responseData['status'] ?? '');
+        _showSuccessDialog(score, responseData['status'] ?? '', stakeTxHash: stakeTxHash);
         setState(() {
           claimController.clear();
           imageFile = null;
@@ -502,7 +598,7 @@ class _SubmitScreenState extends State<SubmitScreen> {
     }
   }
 
-  void _showSuccessDialog(double score, String status) {
+  void _showSuccessDialog(double score, String status, {String? stakeTxHash}) {
     int percentage = (score * 100).round();
     showDialog(
       context: context,
@@ -556,6 +652,44 @@ class _SubmitScreenState extends State<SubmitScreen> {
                 textAlign: TextAlign.center,
               ),
             ),
+            // On-chain TX hash display
+            if (stakeTxHash != null) ...[
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: AppColors.card,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: AppColors.cyan.withValues(alpha: 0.3)),
+                ),
+                child: Column(
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.link_rounded, color: AppColors.cyan, size: 14),
+                        const SizedBox(width: 6),
+                        Text('ON-CHAIN TX', style: GoogleFonts.inter(
+                          fontSize: 9, fontWeight: FontWeight.w700, color: AppColors.cyan, letterSpacing: 1,
+                        )),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    GestureDetector(
+                      onTap: () {
+                        Clipboard.setData(ClipboardData(text: stakeTxHash));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('TX hash copied!'), duration: Duration(seconds: 1)),
+                        );
+                      },
+                      child: Text(
+                        '${stakeTxHash.substring(0, 10)}...${stakeTxHash.substring(stakeTxHash.length - 8)}',
+                        style: GoogleFonts.jetBrainsMono(fontSize: 11, color: AppColors.textSecondary),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ],
         ),
         actions: [
@@ -579,12 +713,23 @@ class _SubmitScreenState extends State<SubmitScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('SUBMIT INTELLIGENCE', style: GoogleFonts.inter(
-          fontSize: 14, fontWeight: FontWeight.w800, color: AppColors.cyan, letterSpacing: 2,
-        )),
-      ),
+    return GestureDetector(
+      onTap: () => FocusScope.of(context).unfocus(),
+      child: Scaffold(
+        appBar: AppBar(
+          leading: widget.onNavigate != null
+            ? IconButton(
+                icon: const Icon(Icons.arrow_back_rounded, color: AppColors.cyan),
+                onPressed: () {
+                  FocusScope.of(context).unfocus();
+                  widget.onNavigate!(0); // Go back home
+                },
+              )
+            : null,
+          title: Text('SUBMIT INTELLIGENCE', style: GoogleFonts.inter(
+            fontSize: 14, fontWeight: FontWeight.w800, color: AppColors.cyan, letterSpacing: 2,
+          )),
+        ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(20),
         child: Column(
@@ -833,6 +978,7 @@ class _SubmitScreenState extends State<SubmitScreen> {
           ],
         ),
       ),
+      ),
     );
   }
 }
@@ -842,7 +988,10 @@ class _SubmitScreenState extends State<SubmitScreen> {
 // ─────────────────────────────────────────────
 class HistoryScreen extends StatefulWidget {
   final String apiUrl;
-  const HistoryScreen({super.key, required this.apiUrl});
+  final String wallet;
+  final Function(int)? onNavigate;
+  
+  const HistoryScreen({super.key, required this.apiUrl, required this.wallet, this.onNavigate});
 
   @override
   State<HistoryScreen> createState() => _HistoryScreenState();
@@ -861,7 +1010,10 @@ class _HistoryScreenState extends State<HistoryScreen> {
   Future<void> _fetchFacts() async {
     setState(() => loading = true);
     try {
-      final res = await http.get(Uri.parse('${widget.apiUrl}/facts')).timeout(const Duration(seconds: 10));
+      final url = widget.wallet.isNotEmpty 
+          ? '${widget.apiUrl}/facts?address=${widget.wallet}'
+          : '${widget.apiUrl}/facts';
+      final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 10));
       final data = json.decode(res.body);
       setState(() {
         facts = data['facts'] ?? [];
@@ -885,6 +1037,12 @@ class _HistoryScreenState extends State<HistoryScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
+        leading: widget.onNavigate != null
+          ? IconButton(
+              icon: const Icon(Icons.arrow_back_rounded, color: AppColors.cyan),
+              onPressed: () => widget.onNavigate!(0),
+            )
+          : null,
         title: Text('NETWORK ACTIVITY', style: GoogleFonts.inter(
           fontSize: 14, fontWeight: FontWeight.w800, color: AppColors.cyan, letterSpacing: 2,
         )),
@@ -1003,6 +1161,9 @@ class SettingsScreen extends StatefulWidget {
   final String apiUrl;
   final Function(String) onApiUrlChanged;
   final VoidCallback onWalletReset;
+  final bool requireOnChain;
+  final Function(bool) onRequireOnChainChanged;
+  final Function(int)? onNavigate;
 
   const SettingsScreen({
     super.key,
@@ -1010,6 +1171,9 @@ class SettingsScreen extends StatefulWidget {
     required this.apiUrl,
     required this.onApiUrlChanged,
     required this.onWalletReset,
+    required this.requireOnChain,
+    required this.onRequireOnChainChanged,
+    this.onNavigate,
   });
 
   @override
@@ -1018,11 +1182,15 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   late TextEditingController urlController;
+  double? _usdcBalance;
+  double? _ethBalance;
+  bool _loadingBalance = false;
 
   @override
   void initState() {
     super.initState();
     urlController = TextEditingController(text: widget.apiUrl);
+    _fetchBalances();
   }
 
   @override
@@ -1031,17 +1199,157 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (oldWidget.apiUrl != widget.apiUrl) {
       urlController.text = widget.apiUrl;
     }
+    if (oldWidget.wallet != widget.wallet) {
+      _fetchBalances();
+    }
+  }
+
+  Future<void> _fetchBalances() async {
+    if (!ApertureWalletService.isInitialized) return;
+    setState(() => _loadingBalance = true);
+    try {
+      final usdc = await ApertureWalletService.getUsdcBalance();
+      final eth = await ApertureWalletService.getEthBalance();
+      if (mounted) {
+        setState(() {
+          _usdcBalance = usdc;
+          _ethBalance = eth;
+          _loadingBalance = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => _loadingBalance = false);
+    }
+  }
+
+  void _showExportKeyDialog() async {
+    final key = await ApertureWalletService.exportPrivateKey();
+    if (!mounted || key == null) return;
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            const Icon(Icons.warning_rounded, color: AppColors.amber, size: 24),
+            const SizedBox(width: 8),
+            Text('Private Key', style: GoogleFonts.inter(color: AppColors.textPrimary, fontSize: 16)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('NEVER share this with anyone. This key controls your wallet.',
+              style: GoogleFonts.inter(color: AppColors.red, fontSize: 11, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 12),
+            GestureDetector(
+              onTap: () {
+                Clipboard.setData(ClipboardData(text: '0x$key'));
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Private key copied!'), duration: Duration(seconds: 1)),
+                );
+              },
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: AppColors.bg,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: AppColors.border),
+                ),
+                child: Text('0x${key.substring(0, 8)}...${key.substring(key.length - 8)}\n(tap to copy full key)',
+                  style: GoogleFonts.jetBrainsMono(fontSize: 11, color: AppColors.textSecondary),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text('CLOSE', style: GoogleFonts.inter(color: AppColors.cyan, fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showImportKeyDialog() {
+    final keyController = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text('Import Private Key', style: GoogleFonts.inter(color: AppColors.textPrimary, fontSize: 16)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Paste your existing Ethereum private key to restore a wallet.',
+              style: GoogleFonts.inter(color: AppColors.textSecondary, fontSize: 12)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: keyController,
+              style: GoogleFonts.jetBrainsMono(color: AppColors.textPrimary, fontSize: 12),
+              decoration: InputDecoration(
+                hintText: '0x...',
+                hintStyle: GoogleFonts.jetBrainsMono(color: AppColors.textMuted, fontSize: 12),
+                filled: true, fillColor: AppColors.bg,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text('Cancel', style: GoogleFonts.inter(color: AppColors.textMuted)),
+          ),
+          TextButton(
+            onPressed: () async {
+              try {
+                await ApertureWalletService.importPrivateKey(keyController.text.trim());
+                Navigator.of(ctx).pop();
+                widget.onWalletReset();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Wallet imported successfully!')),
+                );
+              } catch (e) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Error: $e'), backgroundColor: AppColors.red),
+                );
+              }
+            },
+            child: Text('IMPORT', style: GoogleFonts.inter(color: AppColors.green, fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('SETTINGS', style: GoogleFonts.inter(
-          fontSize: 14, fontWeight: FontWeight.w800, color: AppColors.cyan, letterSpacing: 2,
-        )),
-      ),
-      body: SingleChildScrollView(
+    return GestureDetector(
+      onTap: () => FocusScope.of(context).unfocus(),
+      child: Scaffold(
+        appBar: AppBar(
+          leading: widget.onNavigate != null
+            ? IconButton(
+                icon: const Icon(Icons.arrow_back_rounded, color: AppColors.cyan),
+                onPressed: () {
+                  FocusScope.of(context).unfocus();
+                  widget.onNavigate!(0); // Go back home
+                },
+              )
+            : null,
+          title: Text('SETTINGS', style: GoogleFonts.inter(
+            fontSize: 14, fontWeight: FontWeight.w800, color: AppColors.cyan, letterSpacing: 2,
+          )),
+        ),
+        body: SingleChildScrollView(
         padding: const EdgeInsets.all(20),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1086,7 +1394,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   onPressed: () {
                     widget.onApiUrlChanged(urlController.text.trim());
                     ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('✅ Backend URL saved'), duration: Duration(seconds: 1)),
+                      const SnackBar(content: Text('Backend URL saved'), duration: Duration(seconds: 1)),
                     );
                   },
                   style: ElevatedButton.styleFrom(
@@ -1097,6 +1405,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   child: Text('SAVE', style: GoogleFonts.inter(fontWeight: FontWeight.w700, color: Colors.white)),
                 ),
               ],
+            ),
+            const SizedBox(height: 32),
+
+            // Staking Mode Section
+            Text('STAKING MODE', style: GoogleFonts.inter(
+              fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.textMuted, letterSpacing: 1.5,
+            )),
+            const SizedBox(height: 10),
+            _GlassCard(
+              child: SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                activeColor: AppColors.cyan,
+                title: Text('Require On-Chain Staking', style: GoogleFonts.inter(color: AppColors.textPrimary, fontSize: 13, fontWeight: FontWeight.w600)),
+                subtitle: Text(
+                  'When enabled, facts are fully backed by real USDC on Base Sepolia. When disabled, facts degrade to off-chain reputation (zero fees).',
+                  style: GoogleFonts.inter(color: AppColors.textMuted, fontSize: 11),
+                ),
+                value: widget.requireOnChain,
+                onChanged: widget.onRequireOnChainChanged,
+              ),
             ),
             const SizedBox(height: 32),
 
@@ -1132,6 +1460,89 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                   const SizedBox(height: 14),
+
+                  // Balances
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: AppColors.bg,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: AppColors.cyan.withValues(alpha: 0.2)),
+                    ),
+                    child: _loadingBalance
+                      ? Center(child: Text('Loading balances...', style: GoogleFonts.inter(color: AppColors.textMuted, fontSize: 11)))
+                      : Column(
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text('USDC Balance', style: GoogleFonts.inter(color: AppColors.textMuted, fontSize: 11)),
+                                Text('\$${_usdcBalance?.toStringAsFixed(2) ?? '—'} USDC',
+                                  style: GoogleFonts.jetBrainsMono(color: AppColors.green, fontSize: 13, fontWeight: FontWeight.w700)),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text('ETH (Gas)', style: GoogleFonts.inter(color: AppColors.textMuted, fontSize: 11)),
+                                Text('${_ethBalance?.toStringAsFixed(5) ?? '—'} ETH',
+                                  style: GoogleFonts.jetBrainsMono(color: AppColors.textSecondary, fontSize: 13)),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            GestureDetector(
+                              onTap: _fetchBalances,
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const Icon(Icons.refresh_rounded, color: AppColors.cyan, size: 14),
+                                  const SizedBox(width: 4),
+                                  Text('Refresh', style: GoogleFonts.inter(color: AppColors.cyan, fontSize: 10)),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                  ),
+                  const SizedBox(height: 14),
+
+                  // Wallet Actions
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _showExportKeyDialog,
+                          icon: const Icon(Icons.key_rounded, color: AppColors.amber, size: 16),
+                          label: Text('EXPORT KEY', style: GoogleFonts.inter(
+                            color: AppColors.amber, fontWeight: FontWeight.w600, fontSize: 11,
+                          )),
+                          style: OutlinedButton.styleFrom(
+                            side: const BorderSide(color: AppColors.amber, width: 0.5),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            padding: const EdgeInsets.symmetric(vertical: 10),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _showImportKeyDialog,
+                          icon: const Icon(Icons.download_rounded, color: AppColors.cyan, size: 16),
+                          label: Text('IMPORT KEY', style: GoogleFonts.inter(
+                            color: AppColors.cyan, fontWeight: FontWeight.w600, fontSize: 11,
+                          )),
+                          style: OutlinedButton.styleFrom(
+                            side: const BorderSide(color: AppColors.cyan, width: 0.5),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            padding: const EdgeInsets.symmetric(vertical: 10),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
                   SizedBox(
                     width: double.infinity,
                     child: OutlinedButton.icon(
@@ -1143,7 +1554,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                             title: Text('Reset Wallet?', style: GoogleFonts.inter(color: AppColors.textPrimary)),
                             content: Text(
-                              'This generates a new identity. Your old submission history and reputation will be lost.',
+                              'This generates a NEW private key. Your old wallet and on-chain USDC will be permanently inaccessible unless you exported the key.',
                               style: GoogleFonts.inter(color: AppColors.textSecondary, fontSize: 13),
                             ),
                             actions: [
@@ -1156,8 +1567,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                   widget.onWalletReset();
                                   Navigator.of(ctx).pop();
                                   ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(content: Text('🔑 New wallet generated')),
+                                    const SnackBar(content: Text('New wallet generated')),
                                   );
+                                  _fetchBalances();
                                 },
                                 child: Text('RESET', style: GoogleFonts.inter(color: AppColors.red, fontWeight: FontWeight.w700)),
                               ),
@@ -1193,18 +1605,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   const SizedBox(height: 8),
                   _StatusRow(label: 'Engine', value: '6-Signal Bayesian V3.1'),
                   const SizedBox(height: 8),
-                  _StatusRow(label: 'Settlement', value: 'Stake & Slash'),
+                  _StatusRow(label: 'Network', value: 'Base Sepolia (84532)'),
+                  const SizedBox(height: 8),
+                  _StatusRow(label: 'Settlement', value: 'On-Chain Stake & Slash'),
                   const SizedBox(height: 8),
                   _StatusRow(label: 'Payments', value: 'x402 HTTP Protocol'),
+                  const SizedBox(height: 8),
+                  _StatusRow(label: 'Vault', value: '0x8281...EE36'),
                 ],
               ),
             ),
           ],
         ),
       ),
+      ),
     );
   }
 }
+
+
 
 // ─────────────────────────────────────────────
 // REUSABLE COMPONENTS

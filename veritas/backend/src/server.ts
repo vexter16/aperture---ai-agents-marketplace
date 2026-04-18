@@ -14,6 +14,11 @@ import {
 } from './db/index';
 import { embedText } from './services/embeddings';
 import { calculateProvisionalScore, calculateTerminalScore, FactData } from './services/credibility';
+import { 
+  getStakeTransactionData, releaseStakeOnChain, slashStakeOnChain, 
+  getStakeOnChain, getBlockchainStatus, getUsdcBalance, getTotalLocked,
+  verifyStakeTransaction 
+} from './services/blockchain';
 
 const app = express();
 app.use(cors());
@@ -93,7 +98,8 @@ async function x402Paywall(req: any, res: any, next: any) {
 
 app.get('/facts', async (req, res) => {
   try {
-    const facts = await getAllFacts();
+    const walletAddress = req.query.address as string | undefined;
+    const facts = await getAllFacts(walletAddress);
     res.json({ facts });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -170,8 +176,8 @@ app.post('/facts', upload.single('image'), async (req, res) => {
     const provisionalResult = calculateProvisionalScore(targetFact, relatedFacts);
 
     if (provisionalResult.status === 'REJECTED_SYBIL_SUSPECT') {
-       if (process.env.NODE_ENV === 'test' || process.env.BYPASS_SYBIL === 'true') {
-          console.log("⚠️ [TEST MODE] Bypassing Sybil/Bot detection so test can continue.");
+       if (process.env.NODE_ENV === 'test' || process.env.BYPASS_SYBIL === 'true' || process.env.DEMO_MODE === 'true') {
+          console.log("⚠️ [Demo/Test Mode] Bypassing Sybil/Bot detection so scenario can continue.");
        } else {
           return res.status(403).json({ error: 'Rejected: Sybil/Bot behavior detected.', score: provisionalResult.finalScore });
        }
@@ -186,24 +192,69 @@ app.post('/facts', upload.single('image'), async (req, res) => {
       latitude: parseFloat(latitude), longitude: parseFloat(longitude),
       stake_amount: parsedStake, image_url: imageUrl,
       credibility_score: provisionalResult.finalScore, embedding,
-      price_usdc: priceUsdc 
+      price_usdc: priceUsdc, staker_address: wallet_address 
     });
 
     // FIX: Persist the REAL provisional signals so Stage 2 can use them
     await insertCredibilitySignals(newFact.id, provisionalResult.signals);
+
+    // DEMO MODE: Auto-lock facts so they appear in the marketplace immediately
+    // (In production, facts stay 'pending' until the mobile wallet confirms the on-chain tx)
+    if (process.env.DEMO_MODE === 'true') {
+      await pool.query("UPDATE facts SET stake_status = 'locked' WHERE id = $1", [newFact.id]);
+      console.log(`🎭 [Demo Mode] Auto-locked fact ${newFact.id.substring(0,8)} (skipping on-chain confirmation)`);
+    }
+
+    // Generate the on-chain staking transaction data for the Flutter app
+    let stakeTransactions = null;
+    try {
+      stakeTransactions = getStakeTransactionData(newFact.id, parsedStake);
+      console.log(`⛓️  [Blockchain] Stake TX data generated for fact ${newFact.id.substring(0,8)}`);
+    } catch (err: any) {
+      console.warn(`⚠️  [Blockchain] Skipping on-chain stake (not configured): ${err.message}`);
+    }
 
     console.log(`✅ [API] Fact Staked: ${newFact.id} | Status: ${provisionalResult.status} | Score: ${(provisionalResult.finalScore * 100).toFixed(1)}%`);
     res.status(201).json({ 
       id: newFact.id, 
       credibility_score: provisionalResult.finalScore, 
       status: provisionalResult.status,
+      stakeTransactions, // The Flutter app uses this to sign the on-chain USDC lock
       message: provisionalResult.status === 'PENDING_CORROBORATION' 
         ? 'Fact staked — awaiting corroboration from other submitters' 
         : 'Fact staked and indexed'
     });
   } catch (err: any) {
-    console.error("❌ [CRITICAL API ERROR]:", err); // <-- NEW: Actually prints the error to your terminal
+    console.error("❌ [CRITICAL API ERROR]:", err);
     res.status(500).json({ error: err.message || "Unknown Server Error - Check Terminal" });
+  }
+});
+
+// 1b. CONFIRM ON-CHAIN STAKE (Flutter calls this after the human signs the tx)
+app.post('/facts/:id/confirm-stake', async (req, res) => {
+  try {
+    const factId = req.params.id;
+    const { stake_tx_hash } = req.body;
+    if (!stake_tx_hash) return res.status(400).json({ error: 'stake_tx_hash required' });
+
+    console.log(`⏱️  [Blockchain] Verifying stake transaction ${stake_tx_hash.substring(0,16)}...`);
+    const isSuccess = await verifyStakeTransaction(stake_tx_hash);
+    
+    if (!isSuccess) {
+      // Transaction failed on-chain (e.g. out of gas or reverted)
+      // Fact remains in 'pending' status and is ignored by the marketplace.
+      return res.status(400).json({ error: 'Transaction failed or reverted on chain' });
+    }
+
+    // Store the on-chain transaction hash and mark as locked
+    await pool.query(
+      'UPDATE facts SET stake_tx_hash = $1, stake_status = $2 WHERE id = $3',
+      [stake_tx_hash, 'locked', factId]
+    );
+    console.log(`⛓️  [Blockchain] Stake confirmed on-chain for ${factId.substring(0,8)} | TX: ${stake_tx_hash.substring(0,16)}...`);
+    res.json({ success: true, stake_tx_hash, status: 'locked' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -264,24 +315,45 @@ app.post('/facts/:id/feedback', async (req, res) => {
     };
 
     // Run STAGE 2 Math, injecting the fact's domain to pull the mathematically accurate structural priors
-    const terminalResult = calculateTerminalScore(provisionalSignals, isTrue, agentTrust, fact.domain);
+    // In demo mode, lower the reward threshold to accommodate cold-start (sparse data, no corroboration)
+    // Production: 0.70 (requires multi-submitter corroboration). Demo: 0.42 (agent feedback is decisive)
+    const rewardThreshold = process.env.DEMO_MODE === 'true' ? 0.42 : 0.70;
+    const terminalResult = calculateTerminalScore(provisionalSignals, isTrue, agentTrust, fact.domain, rewardThreshold);
 
     console.log(`⚖️ [Settlement] Fact ${factId.substring(0,8)} | Terminal Score: ${(terminalResult.finalScore*100).toFixed(1)}%`);
 
-    // EXECUTE THE GAME THEORY
+    // EXECUTE THE GAME THEORY (Off-chain DB update + On-chain settlement)
+    let settlementTxHash: string | null = null;
     if (terminalResult.terminal_status === 'REWARD') {
       await updateFactStatus(factId, 'released', terminalResult.finalScore);
-      await updateSubmitterReputation(fact.submitter_id, 0.05); // Boost Human Rep
-      await updateAgentTrustScore(agent_id, isTrue ? 0.02 : -0.10); // Reward agent if they agreed with consensus, slash if they lied
-      console.log(`💰 [Game Theory] Human rewarded. Stake released.`);
+      await updateSubmitterReputation(fact.submitter_id, 0.05);
+      await updateAgentTrustScore(agent_id, isTrue ? 0.02 : -0.10);
+      
+      // On-chain: Release the USDC back to the human
+      try {
+        settlementTxHash = await releaseStakeOnChain(factId);
+        await pool.query('UPDATE facts SET settlement_tx_hash = $1 WHERE id = $2', [settlementTxHash, factId]);
+        console.log(`💰 [Game Theory] Human rewarded. Stake released on-chain. TX: ${settlementTxHash}`);
+      } catch (err: any) {
+        console.warn(`⚠️  [Blockchain] On-chain release failed (stake may not be on-chain): ${err.message}`);
+        console.log(`💰 [Game Theory] Human rewarded. Stake released (off-chain only).`);
+      }
     } else {
       await updateFactStatus(factId, 'slashed', terminalResult.finalScore);
-      await updateSubmitterReputation(fact.submitter_id, -0.20); // Slash Human Rep
-      // Notice: We DO NOT refund the agent here. The BURN mechanism is active.
-      console.log(`🔥 [Game Theory] Consensus failed. Human stake BURNED. Agent fee BURNED.`);
+      await updateSubmitterReputation(fact.submitter_id, -0.20);
+      
+      // On-chain: Slash the USDC (send to treasury)
+      try {
+        settlementTxHash = await slashStakeOnChain(factId);
+        await pool.query('UPDATE facts SET settlement_tx_hash = $1 WHERE id = $2', [settlementTxHash, factId]);
+        console.log(`🔥 [Game Theory] Stake SLASHED on-chain. TX: ${settlementTxHash}`);
+      } catch (err: any) {
+        console.warn(`⚠️  [Blockchain] On-chain slash failed: ${err.message}`);
+        console.log(`🔥 [Game Theory] Consensus failed. Human stake BURNED (off-chain only).`);
+      }
     }
 
-    res.json({ success: true, settlement: terminalResult });
+    res.json({ success: true, settlement: terminalResult, settlement_tx_hash: settlementTxHash });
 
     // FIX: Record feedback in agent_feedback table for audit trail
     // (Non-blocking — don't let audit failure break settlement)
@@ -341,15 +413,86 @@ app.get('/activity', async (req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT f.id, f.text_claim, f.domain, f.credibility_score, f.stake_status, 
-             f.stake_amount, f.submitted_at, f.consumed_count,
+             f.stake_amount, f.submitted_at, f.consumed_count, f.stake_tx_hash, f.settlement_tx_hash,
              s.wallet_address, s.reputation_score
       FROM facts f
       JOIN submitters s ON f.submitter_id = s.id
+      WHERE f.stake_status != 'pending'
       ORDER BY f.submitted_at DESC
       LIMIT 20
     `);
     res.json({ activity: rows });
   } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 7. BLOCKCHAIN STATUS
+app.get('/blockchain/status', async (req, res) => {
+  try {
+    const status = await getBlockchainStatus();
+    const totalLocked = await getTotalLocked();
+    res.json({ ...status, totalLockedUsdc: totalLocked });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 8. GET USDC BALANCE FOR A WALLET
+app.get('/blockchain/balance/:wallet', async (req, res) => {
+  try {
+    const balance = await getUsdcBalance(req.params.wallet);
+    res.json({ wallet: req.params.wallet, usdc_balance: balance, network: 'base-sepolia' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 9. GET ON-CHAIN STAKE STATUS FOR A FACT
+app.get('/blockchain/stake/:factId', async (req, res) => {
+  try {
+    const stake = await getStakeOnChain(req.params.factId);
+    if (!stake) return res.json({ on_chain: false, message: 'Stake not found on-chain (may be off-chain only)' });
+    res.json({ on_chain: true, ...stake });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────
+// DEMO MODE: Reset endpoint (only available in demo mode)
+// Resets submitter reputation and agent trust to specified values
+// ─────────────────────────────────────────────
+app.post('/demo/reset', async (req, res) => {
+  if (process.env.DEMO_MODE !== 'true') {
+    return res.status(403).json({ error: 'Demo reset only available in DEMO_MODE' });
+  }
+  try {
+    const { wallet_address, reputation, agent_id, agent_trust } = req.body;
+    let factsDeleted = 0;
+    
+    if (wallet_address) {
+      // Reset reputation (don't delete facts — preserves phone-submitted data)
+      if (reputation !== undefined) {
+        await pool.query(
+          'UPDATE submitters SET reputation_score = $1 WHERE wallet_address = $2',
+          [reputation, wallet_address]
+        );
+      }
+      console.log(`🎭 [Demo Reset] Submitter ${wallet_address.substring(0,10)}... → rep=${reputation}`);
+    }
+    
+    if (agent_id && agent_trust !== undefined) {
+      await pool.query(
+        'INSERT INTO agents (id, trust_score) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET trust_score = $2',
+        [agent_id, agent_trust]
+      );
+      console.log(`🎭 [Demo Reset] Agent ${agent_id} trust → ${agent_trust}`);
+    }
+    
+    res.json({ success: true, reputation, agent_trust, facts_deleted: factsDeleted });
+  } catch (err: any) {
+    console.error('🎭 [Demo Reset] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });

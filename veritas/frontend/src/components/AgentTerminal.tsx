@@ -15,6 +15,8 @@ interface ActivityItem {
   consumed_count: number;
   wallet_address: string;
   reputation_score: number;
+  stake_tx_hash?: string;
+  settlement_tx_hash?: string;
 }
 
 function timeAgo(dateStr: string): string {
@@ -100,6 +102,20 @@ export default function AgentTerminal() {
                 <span>Buys: {item.consumed_count}</span>
                 <span className="uppercase">{item.stake_status}</span>
               </div>
+              {(item.stake_tx_hash || item.settlement_tx_hash) && (
+                <div className="flex gap-3 mt-1.5 pt-1.5 border-t border-slate-800/60 text-[9px] font-mono text-cyan-400">
+                  {item.stake_tx_hash && (
+                    <a href={`https://sepolia.basescan.org/tx/${item.stake_tx_hash}`} target="_blank" rel="noopener noreferrer" className="hover:underline flex items-center gap-1">
+                      <span className="text-slate-500">STAKE:</span> {item.stake_tx_hash.substring(0, 8)}...
+                    </a>
+                  )}
+                  {item.settlement_tx_hash && (
+                    <a href={`https://sepolia.basescan.org/tx/${item.settlement_tx_hash}`} target="_blank" rel="noopener noreferrer" className="hover:underline flex items-center gap-1">
+                      <span className="text-slate-500">SETTLE:</span> {item.settlement_tx_hash.substring(0, 8)}...
+                    </a>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         ))}

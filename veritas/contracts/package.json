@@ -1,0 +1,19 @@
+{
+  "name": "aperture-contracts",
+  "version": "1.0.0",
+  "description": "Aperture Protocol Smart Contracts",
+  "scripts": {
+    "compile": "npx hardhat compile",
+    "deploy": "npx hardhat run scripts/deploy.ts --network baseSepolia",
+    "deploy:local": "npx hardhat run scripts/deploy.ts --network hardhat",
+    "verify": "npx hardhat verify --network baseSepolia"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/contracts": "^5.2.0",
+    "hardhat": "^2.24.0",
+    "dotenv": "^17.3.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}

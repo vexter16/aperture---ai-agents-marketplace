@@ -53,8 +53,8 @@ export async function upsertSubmitter(walletAddress: string) {
 export async function insertFact(fact: any) {
   const query = `
     INSERT INTO facts 
-    (submitter_id, text_claim, domain, location_name, latitude, longitude, stake_amount, embedding, price_usdc, credibility_score)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    (submitter_id, text_claim, domain, location_name, latitude, longitude, stake_amount, embedding, price_usdc, credibility_score, staker_address)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
     RETURNING *;
   `;
   
@@ -64,7 +64,7 @@ export async function insertFact(fact: any) {
     fact.submitter_id, fact.text_claim, fact.domain, fact.location_name ?? null,
     fact.latitude ?? null, fact.longitude ?? null, fact.stake_amount, 
     fact.embedding ? toSqlVector(fact.embedding) : null, fact.price_usdc ?? 0.05,
-    fact.credibility_score ?? null
+    fact.credibility_score ?? null, fact.staker_address ?? null
   ];
 
   const { rows } = await pool.query(query, values);
@@ -84,7 +84,7 @@ export async function semanticSearch(queryEmbedding: number[], threshold: number
     FROM facts f
     JOIN submitters s ON f.submitter_id = s.id
     WHERE 
-      f.stake_status NOT IN ('slashed')
+      f.stake_status NOT IN ('slashed', 'pending')
       AND 1 - (f.embedding <=> $1::vector) > $2
     ORDER BY similarity DESC
     LIMIT $3;
@@ -99,12 +99,22 @@ export async function getFactById(id: string) {
   return rows[0];
 }
 
-export async function getAllFacts() {
-  const { rows } = await pool.query(`
+export async function getAllFacts(walletAddress?: string) {
+  let query = `
     SELECT id, text_claim, domain, price_usdc, credibility_score, latitude, longitude 
     FROM facts 
-    ORDER BY submitted_at DESC LIMIT 50
-  `);
+    WHERE stake_status NOT IN ('pending')
+  `;
+  const values: any[] = [];
+  
+  if (walletAddress) {
+    query += ` AND staker_address = $1 `;
+    values.push(walletAddress);
+  }
+  
+  query += ` ORDER BY submitted_at DESC LIMIT 50`;
+  
+  const { rows } = await pool.query(query, values);
   return rows;
 }
 
