@@ -1,6 +1,7 @@
 "use client";
-import { useState } from "react";
-import { Send, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { useState, useRef } from "react";
+import { Send, Loader2, CheckCircle2, AlertCircle, ImagePlus, X } from "lucide-react";
+import { VerificationData } from "./VerificationViewer";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
@@ -18,9 +19,10 @@ interface SubmitResult {
   message: string;
   score?: number;
   status?: string;
+  verificationMode?: string;
 }
 
-export default function SubmitFact({ onSubmitted }: { onSubmitted?: () => void }) {
+export default function SubmitFact({ onSubmitted, onVerification }: { onSubmitted?: () => void; onVerification?: (data: VerificationData) => void }) {
   const [claim, setClaim] = useState("");
   const [domain, setDomain] = useState("logistics");
   const [wallet, setWallet] = useState("");
@@ -29,6 +31,8 @@ export default function SubmitFact({ onSubmitted }: { onSubmitted?: () => void }
   const [lon, setLon] = useState("77.5946");
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<SubmitResult | null>(null);
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -42,6 +46,9 @@ export default function SubmitFact({ onSubmitted }: { onSubmitted?: () => void }
     formData.append("stake_amount", stake);
     formData.append("latitude", lat);
     formData.append("longitude", lon);
+    if (imageFile) {
+      formData.append("image", imageFile);
+    }
 
     try {
       const res = await fetch(`${API}/facts`, { method: "POST", body: formData });
@@ -53,11 +60,29 @@ export default function SubmitFact({ onSubmitted }: { onSubmitted?: () => void }
           message: data.message || "Fact staked successfully",
           score: data.credibility_score,
           status: data.status,
+          verificationMode: data.coherence?.verification_mode,
         });
         setClaim("");
+        setImageFile(null);
+        if (fileInputRef.current) fileInputRef.current.value = "";
         onSubmitted?.();
+
+        // Bubble up verification data to parent
+        if (onVerification) {
+          onVerification({
+            coherence: data.coherence || null,
+            heuristic: data.heuristic || null,
+          });
+        }
       } else {
         setResult({ type: "error", message: data.error || "Submission failed" });
+        // Even on rejection, bubble up verification data (shows why it failed)
+        if (onVerification && (data.coherence || data.heuristic)) {
+          onVerification({
+            coherence: data.coherence || null,
+            heuristic: data.heuristic || null,
+          });
+        }
       }
     } catch {
       setResult({ type: "error", message: "Cannot reach backend — is the server running?" });
@@ -132,6 +157,38 @@ export default function SubmitFact({ onSubmitted }: { onSubmitted?: () => void }
             className="bg-slate-800/60 border border-slate-700/50 rounded-lg px-3 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-cyan-500/50" required />
         </div>
 
+        {/* Image Upload */}
+        <div className="relative">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            onChange={e => setImageFile(e.target.files?.[0] || null)}
+            className="hidden"
+            id="evidence-image"
+          />
+          <label
+            htmlFor="evidence-image"
+            className="flex items-center gap-2 w-full bg-slate-800/60 border border-dashed border-slate-600/60 rounded-lg px-3 py-2 text-xs text-slate-400 cursor-pointer hover:border-cyan-500/40 hover:text-slate-300 transition-colors"
+          >
+            <ImagePlus className="w-4 h-4 text-cyan-500/60" />
+            {imageFile ? (
+              <span className="flex-1 truncate text-slate-300">{imageFile.name}</span>
+            ) : (
+              <span className="flex-1">Attach evidence photo (required for verification)</span>
+            )}
+          </label>
+          {imageFile && (
+            <button
+              type="button"
+              onClick={() => { setImageFile(null); if (fileInputRef.current) fileInputRef.current.value = ""; }}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-red-400 transition-colors"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+
         <button type="submit" disabled={submitting}
           className="w-full bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 disabled:cursor-not-allowed text-white text-sm font-medium py-2 rounded-lg transition-colors flex items-center justify-center gap-2">
           {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
@@ -151,6 +208,9 @@ export default function SubmitFact({ onSubmitted }: { onSubmitted?: () => void }
             {result.score !== undefined && (
               <p className="mt-1 text-[10px] opacity-75">
                 Credibility: {(result.score * 100).toFixed(1)}% • Status: {result.status}
+                {result.verificationMode && (
+                  <> • Verify: {result.verificationMode === 'streetview-360' ? '360° SV' : result.verificationMode}</>  
+                )}
               </p>
             )}
           </div>

@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # Configuration
-DEVICE_ID="00008150-00027C841E98401C"
+DEVICE_ID="00008110-001A64480AD1401E"
 AGENT_DIR="/Users/veeshal/MAJOR PROJECT/aperture1/veritas/aperture_agent"
 
 echo "🚀 Starting Aperture Agent Deployment..."
 echo "📍 Working Directory: $AGENT_DIR"
-echo "📱 Target Device: Siddhanth’s iPhone ($DEVICE_ID)"
+echo "📱 Target Device: Veeshal’s iPhone XIV+ ($DEVICE_ID)"
 
 # Add Brew to Path for the session (prevents 'flutter not found' issues)
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"

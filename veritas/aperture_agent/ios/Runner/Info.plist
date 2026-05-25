@@ -2,12 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>NSCameraUsageDescription</key>
-	<string>Aperture needs camera access to verify visual intelligence.</string>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Aperture needs gallery access to upload evidence.</string>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Aperture requires your location for geospatial corroboration.</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>
@@ -32,6 +26,12 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Aperture needs camera access to verify visual intelligence.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Aperture requires your location for geospatial corroboration.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Aperture needs gallery access to upload evidence.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

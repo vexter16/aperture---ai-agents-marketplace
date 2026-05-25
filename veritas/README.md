@@ -109,9 +109,11 @@ veritas/
 │       ├── mcp-server.ts    # Model Context Protocol server for AI agents
 │       ├── demo.ts          # Interactive 3-scenario demo script
 │       ├── services/
-│       │   ├── credibility.ts   # 5-Signal Heuristic Scoring Engine
-│       │   ├── embeddings.ts    # all-MiniLM-L6-v2 sentence transformer pipeline
-│       │   └── blockchain.ts    # On-chain interactions (staking, slashing, rewards)
+│       │   ├── credibility.ts     # 5-Signal Bayesian Credibility Engine (V3)
+│       │   ├── image-verify.ts    # Multimodal Evidence Verification (Gemini + Street View)
+│       │   ├── embeddings.ts      # all-MiniLM-L6-v2 sentence transformer pipeline
+│       │   ├── agent-consumer.ts  # Autonomous AI Agent simulation (SSE)
+│       │   └── blockchain.ts      # On-chain interactions (staking, slashing, rewards)
 │       └── db/
 │           └── index.ts     # PostgreSQL + pgvector queries
 │
@@ -135,18 +137,22 @@ veritas/
 
 ## How It Works
 
-### Stage 1: Human Submission → Credibility Scoring
+### Stage 1: Human Submission → Multimodal Verification → Credibility Scoring
 
-1. A human opens the **Aperture mobile app**, observes something in the real world, and submits a structured fact (text + optional photo).
+1. A human opens the **Aperture mobile app**, observes something in the real world, and submits a structured fact (text + photo).
 2. The app automatically captures **hardware-level GPS coordinates** and **UTC timestamps** from the device's native sensors — not user-entered, making spoofing significantly harder.
 3. The user **stakes USDC** (real money on Base Sepolia) on the claim's truthfulness.
-4. The backend runs the fact through the **5-Signal Credibility Engine**, producing a composite score:
+4. **Multimodal Evidence Verification** fires immediately via Gemini 2.5 Flash + Google Street View 360° panoramas:
+   - **Text Coherence (Hard Gate)**: Does the submitted image actually match the text claim? A laptop photo cannot be evidence of a fire — this check rejects immediately regardless of confidence.
+   - **Domain Match**: Does the image fit the intelligence domain (e.g., a crop photo for `agricultural`)?
+   - **Location Plausibility**: Are the visual features in the photo consistent with the GPS coordinates? Verified by comparing against 4 cardinal-direction Street View panoramas.
+5. If evidence verification passes, the backend runs the fact through the **5-Signal Credibility Engine**, producing a composite score:
    - **S_rep**: Submitter's historical track record
    - **S_stake**: Quadratic stake weighting (√stake, preventing whale dominance)
    - **S_geo**: Gaussian corroboration over observer separation distances
    - **S_temporal**: Shannon entropy of submission timing (bots are periodic, humans are irregular)
    - **S_semantic**: Embedding variance via all-MiniLM-L6-v2 (detects LLM-generated clone text)
-5. Facts scoring ≥ 0.70 are **approved for the marketplace**. Below 0.40 are **rejected as Sybil suspects**. Between is **pending corroboration**.
+6. Facts scoring ≥ 0.70 are **approved for the marketplace**. Below 0.40 are **rejected as Sybil suspects**. Between is **pending corroboration**.
 
 ### Stage 2: AI Agent Purchase → Terminal Settlement
 
@@ -250,6 +256,10 @@ FACT_PRICE_USDC=0.05
 
 # Demo Mode (set to false for production)
 DEMO_MODE=true
+
+# Multimodal Evidence Verification (Gemini + Street View)
+GEMINI_API_KEY=<your_gemini_api_key>
+GOOGLE_MAPS_API_KEY=<your_google_maps_api_key>
 ```
 
 > **Note:** To generate a fresh agent wallet, run: `npm run generate-agent-wallet`
@@ -364,6 +374,49 @@ Final Score = 0.30 × S_rep + 0.25 × S_stake + 0.15 × S_geo + 0.15 × S_tempor
 The engine is a **weighted heuristic**, not a learned model. Its power comes from **signal orthogonality**: an attacker can game one or two signals, but satisfying all five simultaneously requires behaving indistinguishably from an honest user.
 
 **Stage 2 adds a 6th signal** — AI agent feedback (`S_agent`), weighted by the agent's own trust score. This triggers terminal settlement (reward or slash).
+
+---
+
+## Multimodal Evidence Verification
+
+Before the credibility engine even runs, every image submission passes through a **multimodal verification pipeline** (`backend/src/services/image-verify.ts`) that uses Gemini 2.5 Flash to verify evidence across three dimensions:
+
+```
+┌──────────────┐     ┌─────────────────────┐     ┌──────────────────┐
+│  User Photo  │────▶│  Text Coherence     │────▶│  HARD GATE       │
+│  (base64)    │     │  (image ↔ claim)    │     │  Reject if fail  │
+└──────────────┘     └─────────────────────┘     └────────┬─────────┘
+                                                          │ Pass
+                                                          ▼
+┌──────────────┐     ┌─────────────────────┐     ┌──────────────────┐
+│  360° Street │────▶│  Location Match     │────▶│  SOFT GATE       │
+│  View (N/E/  │     │  (photo ↔ GPS)      │     │  Reject if fail  │
+│  S/W angles) │     │                     │     │  + high conf.    │
+└──────────────┘     └─────────────────────┘     └────────┬─────────┘
+                                                          │ Pass
+                                                          ▼
+                     ┌─────────────────────┐     ┌──────────────────┐
+                     │  Domain Match       │────▶│  SOFT GATE       │
+                     │  (photo ↔ domain)   │     │  → Credibility   │
+                     └─────────────────────┘     │    Engine        │
+                                                 └──────────────────┘
+```
+
+### Two-Tier Rejection Logic
+
+| Check | Gate Type | Behavior |
+|---|---|---|
+| **Text Coherence** | **Hard Gate** | Rejects immediately if image is unrelated to the claim, regardless of confidence. A laptop photo is never evidence of a fire. |
+| **Domain Match** | Soft Gate | Only rejects when confidence > 0.6 to avoid false positives on ambiguous evidence. |
+| **Location Match** | Soft Gate | Only rejects when confidence > 0.6. Indoor/close-up photos auto-pass since Street View can't verify interiors. |
+
+### Edge Case Handling
+
+- **Indoor/Close-up Photos**: Detected automatically — location check auto-passes (Street View only shows outdoor views)
+- **Night vs. Day**: Gemini focuses on permanent structures, not lighting
+- **Weather Differences**: Rain/fog/snow in the user's photo vs. clear Street View is ignored
+- **Temporal Changes**: New construction vs. old Street View data — only rejects if fundamental terrain is wrong
+- **No Street View Coverage**: Falls back to zero-shot spatial reasoning from Gemini's geographic knowledge
 
 ---
 

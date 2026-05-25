@@ -569,11 +569,116 @@ class _SubmitScreenState extends State<SubmitScreen> {
         }
 
         widget.onSuccess(score);
-        _showSuccessDialog(score, responseData['status'] ?? '', stakeTxHash: stakeTxHash);
+        // Extract coherence data from response if present
+        final coherenceData = responseData['coherence'];
+        _showSuccessDialog(score, responseData['status'] ?? '', stakeTxHash: stakeTxHash, coherence: coherenceData);
         setState(() {
           claimController.clear();
           imageFile = null;
         });
+      } else if (response.statusCode == 400 && responseData['coherence'] != null) {
+        // Evidence verification failure — show which checks failed
+        if (!mounted) return;
+        final coherence = responseData['coherence'];
+        final reasoning = coherence['reasoning'] ?? 'Evidence does not pass verification';
+        final confidence = ((coherence['confidence'] as num?)?.toDouble() ?? 0) * 100;
+        final textMatch = coherence['text_match'] ?? true;
+        final domainMatch = coherence['domain_match'] ?? true;
+        final locationPlausible = coherence['location_plausible'] ?? true;
+        final verificationMode = coherence['verification_mode'] ?? 'zero-shot';
+        
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: AppColors.surface,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: Row(
+              children: [
+                const Icon(Icons.gpp_bad_rounded, color: AppColors.red, size: 28),
+                const SizedBox(width: 10),
+                Expanded(child: Text('Verification Failed', style: GoogleFonts.inter(
+                  color: AppColors.textPrimary, fontWeight: FontWeight.w700,
+                ))),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Your evidence did not pass the AI verification checks.',
+                  style: GoogleFonts.inter(color: AppColors.textSecondary, fontSize: 13)),
+                const SizedBox(height: 16),
+                // ── Individual check results ──
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: AppColors.bg,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: AppColors.border),
+                  ),
+                  child: Column(
+                    children: [
+                      _buildCheckRow('Text Match', textMatch, Icons.text_snippet_rounded),
+                      const SizedBox(height: 8),
+                      _buildCheckRow('Domain Match', domainMatch, Icons.category_rounded),
+                      const SizedBox(height: 8),
+                      _buildCheckRow(
+                        verificationMode == 'streetview-360' ? 'Location (360° Street View)' : 'Location (AI Analysis)',
+                        locationPlausible, 
+                        Icons.location_on_rounded,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                // ── AI reasoning box ──
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: AppColors.red.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: AppColors.red.withValues(alpha: 0.3)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.smart_toy_rounded, color: AppColors.red, size: 14),
+                          const SizedBox(width: 6),
+                          Text('AI REASONING', style: GoogleFonts.inter(
+                            fontSize: 9, fontWeight: FontWeight.w700, color: AppColors.red, letterSpacing: 1,
+                          )),
+                          const Spacer(),
+                          Text('${confidence.toStringAsFixed(0)}% confident', style: GoogleFonts.jetBrainsMono(
+                            fontSize: 10, color: AppColors.red,
+                          )),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(reasoning, style: GoogleFonts.inter(
+                        color: AppColors.textSecondary, fontSize: 12, height: 1.4,
+                      )),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text('Please fix the failing checks and try again.',
+                  style: GoogleFonts.inter(color: AppColors.textMuted, fontSize: 11)),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: Text('GOT IT', style: GoogleFonts.inter(
+                  color: AppColors.cyan, fontWeight: FontWeight.w700, letterSpacing: 1,
+                )),
+              ),
+            ],
+          ),
+        );
       } else if (response.statusCode == 403) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -598,8 +703,49 @@ class _SubmitScreenState extends State<SubmitScreen> {
     }
   }
 
-  void _showSuccessDialog(double score, String status, {String? stakeTxHash}) {
+  /// Builds a single row for the verification check results (pass/fail indicator)
+  Widget _buildCheckRow(String label, bool passed, IconData icon) {
+    return Row(
+      children: [
+        Icon(icon, size: 16, color: passed ? AppColors.green : AppColors.red),
+        const SizedBox(width: 8),
+        Text(label, style: GoogleFonts.inter(
+          color: AppColors.textPrimary, fontSize: 13, fontWeight: FontWeight.w500,
+        )),
+        const Spacer(),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: BoxDecoration(
+            color: (passed ? AppColors.green : AppColors.red).withValues(alpha: 0.15),
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                passed ? Icons.check_circle_rounded : Icons.cancel_rounded,
+                size: 12,
+                color: passed ? AppColors.green : AppColors.red,
+              ),
+              const SizedBox(width: 4),
+              Text(
+                passed ? 'PASS' : 'FAIL',
+                style: GoogleFonts.jetBrainsMono(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  color: passed ? AppColors.green : AppColors.red,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _showSuccessDialog(double score, String status, {String? stakeTxHash, Map<String, dynamic>? coherence}) {
     int percentage = (score * 100).round();
+    final bool hasCoherence = coherence != null && coherence['confidence'] != null && (coherence['confidence'] as num) > 0;
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -684,6 +830,47 @@ class _SubmitScreenState extends State<SubmitScreen> {
                       child: Text(
                         '${stakeTxHash.substring(0, 10)}...${stakeTxHash.substring(stakeTxHash.length - 8)}',
                         style: GoogleFonts.jetBrainsMono(fontSize: 11, color: AppColors.textSecondary),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            // Image-Text Coherence verification badge
+            if (hasCoherence) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: AppColors.green.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: AppColors.green.withValues(alpha: 0.3)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.verified_rounded, color: AppColors.green, size: 16),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('IMAGE VERIFIED', style: GoogleFonts.inter(
+                            fontSize: 9, fontWeight: FontWeight.w700, color: AppColors.green, letterSpacing: 1,
+                          )),
+                          const SizedBox(height: 2),
+                          Text(
+                            coherence!['reasoning'] ?? 'Image matches claim',
+                            style: GoogleFonts.inter(fontSize: 10, color: AppColors.textMuted),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                    Text(
+                      '${((coherence['confidence'] as num).toDouble() * 100).toStringAsFixed(0)}%',
+                      style: GoogleFonts.jetBrainsMono(
+                        fontSize: 13, fontWeight: FontWeight.w800, color: AppColors.green,
                       ),
                     ),
                   ],

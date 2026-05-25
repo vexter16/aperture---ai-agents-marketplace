@@ -1,4 +1,43 @@
+# ─── Dependencies ───
+node_modules/
+.pnp/
+.pnp.js
+
+# ─── Environment / Secrets ───
+.env
+.env.local
+.env.*.local
+
+# ─── Build Outputs ───
+# Next.js
+frontend/.next/
+frontend/out/
+
+# Hardhat / Solidity
+contracts/artifacts/
+contracts/cache/
+contracts/typechain-types/
+
+# Flutter
+aperture_agent/build/
+aperture_agent/.dart_tool/
+aperture_agent/.packages
+aperture_agent/ios/Pods/
+aperture_agent/ios/.symlinks/
+aperture_agent/ios/Flutter/Flutter.framework
+aperture_agent/ios/Flutter/Flutter.podspec
+aperture_agent/.flutter-plugins
+aperture_agent/.flutter-plugins-dependencies
+
+# ─── Runtime / Logs ───
+*.log
+backend/uploads/
+docker/pgdata/
+
+# ─── OS / IDE ───
 .DS_Store
+Thumbs.db
 .vscode/
 .idea/
-*.log
+*.swp
+*.swo

@@ -59,16 +59,7 @@ export default function AgentTerminal() {
   };
 
   return (
-    <div className="glass-card flex flex-col h-full overflow-hidden">
-      <div className="flex items-center px-4 py-3 border-b border-slate-800/60">
-        <Terminal className="w-4 h-4 text-emerald-400 mr-2" />
-        <h2 className="text-sm font-semibold text-slate-200 tracking-wide uppercase">Live Activity</h2>
-        <span className="ml-auto flex h-2 w-2 relative">
-          <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${error ? 'bg-red-400' : 'bg-emerald-400'} opacity-75`}></span>
-          <span className={`relative inline-flex rounded-full h-2 w-2 ${error ? 'bg-red-500' : 'bg-emerald-500'}`}></span>
-        </span>
-      </div>
-
+    <div className="flex flex-col h-full overflow-hidden">
       <div ref={scrollRef} className="flex-1 p-3 overflow-y-auto space-y-2 font-mono text-xs">
         {error && (
           <div className="text-red-400/80 text-center py-4">
